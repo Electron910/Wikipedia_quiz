@@ -13,3 +13,4 @@ google-generativeai==0.3.2
 lxml
 gunicorn
 uvicorn[standard]
+psycopg2-binary
