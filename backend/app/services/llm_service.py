@@ -44,7 +44,7 @@ class LLMService:
                 continue
         
         print("Warning: No working model found, defaulting to gemini-1.5-flash")
-        return "gemini-1.5-flash"
+        return "gemini-2.5-flash"
 
     def _clean_json_response(self, response: str) -> str:
         response = re.sub(r"```json\s*", "", response)
