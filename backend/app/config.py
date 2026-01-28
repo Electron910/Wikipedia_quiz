@@ -3,15 +3,16 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    database_url: str = "postgresql+psycopg://postgres:dhanvyn@localhost:5432/wiki_quiz"
-    gemini_api_key: str = "AIzaSyDrO2R-0NaULs7j8sAj_WT2Tyj4z0XYvZI"
+    database_url: str
+    gemini_api_key: str
     app_name: str = "Wiki Quiz App"
     debug: bool = True
 
     class Config:
         env_file = ".env"
+        env_file_encoding = "utf-8"
 
 
 @lru_cache()
-def get_settings():
+def get_settings() -> Settings:
     return Settings()

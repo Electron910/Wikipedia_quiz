@@ -3,7 +3,7 @@ import json
 import re
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import List
 from app.config import get_settings
 
 settings = get_settings()
@@ -20,19 +20,17 @@ class LLMService:
     def _find_working_model(self) -> str:
         models_to_try = [
             "gemini-2.5-flash",
+            "gemini-1.5-flash",
             "gemini-1.5-pro",
             "gemini-pro",
             "gemini-1.0-pro",
-            "gemini-1.5-flash-latest",
-            "gemini-pro-latest",
-            
         ]
         
         for model in models_to_try:
             try:
                 url = f"{self.base_url}/models/{model}:generateContent?key={self.api_key}"
                 payload = {
-                    "contents": [{"parts": [{"text": "Say hi"}]}],
+                    "contents": [{"parts": [{"text": "Say hello"}]}],
                     "generationConfig": {"maxOutputTokens": 10}
                 }
                 response = requests.post(url, json=payload, timeout=10)
@@ -43,56 +41,36 @@ class LLMService:
                 print(f"Model {model} failed: {e}")
                 continue
         
-        print("Warning: No working model found, defaulting to gemini-1.5-flash")
         return "gemini-2.5-flash"
 
-    def _clean_json_response(self, response: str) -> str:
-        response = re.sub(r"```json\s*", "", response)
-        response = re.sub(r"```\s*", "", response)
-        response = re.sub(r"```", "", response)
-        response = response.strip()
-        
-        start_idx = response.find('{')
-        end_idx = response.rfind('}')
-        if start_idx != -1 and end_idx != -1:
-            response = response[start_idx:end_idx + 1]
-        
-        return response
-
-    def _call_llm(self, prompt: str, max_tokens: int = 2048) -> str:
+    def _call_llm(self, prompt: str, max_tokens: int = 4096) -> str:
         try:
             url = f"{self.base_url}/models/{self.model}:generateContent?key={self.api_key}"
             
             payload = {
                 "contents": [
                     {
-                        "parts": [
-                            {"text": prompt}
-                        ]
+                        "parts": [{"text": prompt}]
                     }
                 ],
                 "generationConfig": {
-                    "temperature": 0.3,
+                    "temperature": 0.7,
                     "maxOutputTokens": max_tokens,
-                    "topP": 0.8,
+                    "topP": 0.9,
                     "topK": 40
-                },
-                "safetySettings": [
-                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-                ]
+                }
             }
             
-            response = requests.post(url, json=payload, timeout=60)
+            response = requests.post(url, json=payload, timeout=90)
             
             if response.status_code == 200:
                 data = response.json()
                 if "candidates" in data and len(data["candidates"]) > 0:
                     candidate = data["candidates"][0]
                     if "content" in candidate and "parts" in candidate["content"]:
-                        return candidate["content"]["parts"][0]["text"]
+                        text = candidate["content"]["parts"][0]["text"]
+                        print(f"LLM Response length: {len(text)} chars")
+                        return text
                 print(f"Unexpected response structure: {data}")
                 return ""
             else:
@@ -106,245 +84,354 @@ class LLMService:
             print(f"LLM Error: {e}")
             return ""
 
-    def _get_difficulty_guidelines(self, difficulty: str) -> str:
-        guidelines = {
-            "easy": """
-EASY DIFFICULTY GUIDELINES:
-- Questions about basic facts, names, dates, and locations
-- Direct answers that are explicitly stated in the text
-- Simple "What", "Who", "Where", "When" questions
-- No complex reasoning required
-- Answer should be obvious from reading the text
-- Example: "What is the name of...?", "Where was X born?", "In what year did X happen?"
-""",
-            "medium": """
-MEDIUM DIFFICULTY GUIDELINES:
-- Questions requiring understanding of relationships and connections
-- May require combining information from different parts of the text
-- "Why" and "How" questions about causes and effects
-- Questions about significance or importance of events
-- Requires some inference but answer is supported by text
-- Example: "Why did X lead to Y?", "What was significant about...?", "How did X contribute to...?"
-""",
-            "hard": """
-HARD DIFFICULTY GUIDELINES:
-- Questions requiring deep analysis and critical thinking
-- Must synthesize multiple pieces of information
-- Questions about implications, comparisons, or evaluations
-- May require understanding context beyond explicit statements
-- Complex "Why" questions about motivations or consequences
-- Example: "What can be inferred about...?", "How does X compare to Y in terms of...?", "What would likely have happened if...?"
-""",
-            "mixed": """
-MIXED DIFFICULTY:
-- Generate 2 easy questions (basic facts, direct answers)
-- Generate 3 medium questions (relationships, some inference)
-- Generate 1 hard question (analysis, synthesis)
-"""
-        }
-        return guidelines.get(difficulty, guidelines["mixed"])
+    def _extract_json_from_response(self, response: str) -> str:
+        """Extract JSON from response, handling various formats"""
+        if not response:
+            return ""
+        
+        # Remove markdown code blocks
+        response = re.sub(r'```json\s*', '', response)
+        response = re.sub(r'```\s*', '', response)
+        response = response.strip()
+        
+        # Try to find JSON object
+        json_match = re.search(r'\{[\s\S]*\}', response)
+        if json_match:
+            return json_match.group()
+        
+        # Try to find JSON array
+        array_match = re.search(r'\$\$[\s\S]*?\$\$', response)
+
+        if array_match:
+            return array_match.group()
+        
+        return response
 
     def generate_quiz(self, title: str, content: str, sections: List[str], difficulty: str = "mixed", num_questions: int = 6) -> List[dict]:
-        difficulty_guidelines = self._get_difficulty_guidelines(difficulty)
+        """Generate quiz questions based on difficulty level"""
         
-        if difficulty == "mixed":
-            difficulty_instruction = "Generate questions with mixed difficulties: 2 easy, 3 medium, 1 hard."
-        else:
-            difficulty_instruction = f"Generate ALL {num_questions} questions at {difficulty.upper()} difficulty level."
-
-        prompt = f"""You are a quiz generator. Create exactly {num_questions} multiple-choice quiz questions about "{title}".
-
-{difficulty_guidelines}
-
-{difficulty_instruction}
-
-Article Content:
-{content[:4000]}
-
-STRICT RULES - FOLLOW EXACTLY:
-1. Generate EXACTLY {num_questions} questions
-2. Each question MUST have EXACTLY 4 options
-3. The "answer" field MUST be copied EXACTLY from one of the options (word-for-word match)
-4. All questions must be based ONLY on the provided content - do NOT make up facts
-5. {"ALL questions must be " + difficulty.upper() + " difficulty level" if difficulty != "mixed" else "Mix difficulties: 2 easy, 3 medium, 1 hard"}
-6. Wrong options should be plausible but clearly incorrect
-7. Explanations should be 1-2 sentences referencing the article
-
-OUTPUT FORMAT - Return ONLY this JSON structure, nothing else:
-{{"questions":[
-{{"question":"First question text?","options":["Option A","Option B","Option C","Option D"],"answer":"Option A","difficulty":"{difficulty if difficulty != 'mixed' else 'easy'}","explanation":"Explanation here."}},
-{{"question":"Second question text?","options":["Option A","Option B","Option C","Option D"],"answer":"Option B","difficulty":"{difficulty if difficulty != 'mixed' else 'medium'}","explanation":"Explanation here."}}
-]}}
-
-Generate the quiz now. Return ONLY valid JSON:"""
-
-        response = self._call_llm(prompt, max_tokens=3000)
+        print(f"\n{'='*50}")
+        print(f"Generating {num_questions} {difficulty.upper()} questions for: {title}")
+        print(f"{'='*50}")
+        
+        # Create difficulty-specific prompt
+        prompt = self._create_quiz_prompt(title, content, difficulty, num_questions)
+        
+        # Call LLM
+        response = self._call_llm(prompt, max_tokens=4096)
+        
         if not response:
-            print("Empty response from LLM, using fallback quiz")
+            print("ERROR: Empty response from LLM")
             return self._generate_fallback_quiz(title, difficulty, num_questions)
-            
-        cleaned = self._clean_json_response(response)
+        
+        # Parse response
+        json_str = self._extract_json_from_response(response)
+        print(f"Extracted JSON length: {len(json_str)} chars")
         
         try:
-            data = json.loads(cleaned)
-            questions = []
+            data = json.loads(json_str)
             
-            if isinstance(data, dict) and "questions" in data:
-                questions = data["questions"]
+            questions = []
+            if isinstance(data, dict):
+                if "questions" in data:
+                    questions = data["questions"]
+                elif "quiz" in data:
+                    questions = data["quiz"]
+                else:
+                    # Maybe the dict itself contains question fields
+                    questions = [data] if "question" in data else []
             elif isinstance(data, list):
                 questions = data
             
             if questions:
-                validated_questions = []
-                for q in questions[:num_questions]:
-                    if self._validate_question(q):
-                        if difficulty != "mixed":
-                            q["difficulty"] = difficulty
-                        validated_questions.append(q)
+                validated = self._validate_questions(questions, difficulty, num_questions)
+                if validated:
+                    print(f"SUCCESS: Generated {len(validated)} questions")
+                    return validated
+                else:
+                    print("ERROR: No valid questions after validation")
+            else:
+                print("ERROR: No questions found in response")
+                print(f"Response preview: {json_str[:500]}")
                 
-                if validated_questions:
-                    return validated_questions
-                    
         except json.JSONDecodeError as e:
             print(f"JSON Parse Error: {e}")
-            print(f"Response was: {cleaned[:500]}")
+            print(f"Response preview: {json_str[:500] if json_str else 'empty'}")
+        
+        # If we get here, try a simpler prompt
+        print("Retrying with simplified prompt...")
+        return self._generate_with_simple_prompt(title, content, difficulty, num_questions)
+
+    def _create_quiz_prompt(self, title: str, content: str, difficulty: str, num_questions: int) -> str:
+        """Create a prompt based on difficulty level"""
+        
+        difficulty_desc = {
+            "easy": "EASY - Basic factual questions with obvious answers directly stated in the text. Use simple 'What', 'Who', 'Where', 'When' questions.",
+            "medium": "MEDIUM - Questions requiring understanding of relationships and connections. Some inference needed but answers supported by text.",
+            "hard": "HARD - Complex analytical questions requiring synthesis of multiple facts. Deep understanding and critical thinking needed.",
+            "mixed": "MIXED - Include 2 easy, 2 medium, and 2 hard questions."
+        }
+        
+        diff_instruction = difficulty_desc.get(difficulty, difficulty_desc["mixed"])
+        
+        prompt = f"""You are a quiz generator. Create exactly {num_questions} multiple choice questions about "{title}".
+
+DIFFICULTY LEVEL: {diff_instruction}
+
+ARTICLE CONTENT:
+{content[:5000]}
+
+INSTRUCTIONS:
+1. Create exactly {num_questions} questions
+2. Each question has exactly 4 options labeled as simple text (not A, B, C, D)
+3. One option must be the correct answer
+4. Questions must be based only on the article content
+5. All questions should be {difficulty.upper()} difficulty{"" if difficulty == "mixed" else " level"}
+
+OUTPUT FORMAT - Return a JSON object exactly like this:
+{{
+  "questions": [
+    {{
+      "question": "What year was [subject] born?",
+      "options": ["1900", "1912", "1920", "1930"],
+      "answer": "1912",
+      "difficulty": "{difficulty if difficulty != 'mixed' else 'easy'}",
+      "explanation": "The article states [subject] was born in 1912."
+    }},
+    {{
+      "question": "Where did [subject] work?",
+      "options": ["Location A", "Location B", "Location C", "Location D"],
+      "answer": "Location B",
+      "difficulty": "{difficulty if difficulty != 'mixed' else 'medium'}",
+      "explanation": "According to the article, [subject] worked at Location B."
+    }}
+  ]
+}}
+
+IMPORTANT:
+- The "answer" field must EXACTLY match one of the options
+- Generate exactly {num_questions} questions
+- Return ONLY the JSON object, no other text
+- All questions must be about "{title}" based on the provided content
+
+Generate the quiz now:"""
+
+        return prompt
+
+    def _generate_with_simple_prompt(self, title: str, content: str, difficulty: str, num_questions: int) -> List[dict]:
+        """Try with a simpler prompt if the main one fails"""
+        
+        simple_prompt = f"""Create {num_questions} {difficulty} quiz questions about "{title}".
+
+Content: {content[:3000]}
+
+Return JSON format:
+{{"questions":[{{"question":"Q1?","options":["A","B","C","D"],"answer":"A","difficulty":"{difficulty}","explanation":"Why A is correct."}}]}}
+
+Rules:
+- {num_questions} questions total
+- 4 options each
+- answer must match an option exactly
+- {difficulty} difficulty only
+- JSON only, no other text"""
+
+        response = self._call_llm(simple_prompt, max_tokens=3000)
+        
+        if not response:
+            print("Simple prompt also failed")
+            return self._generate_fallback_quiz(title, difficulty, num_questions)
+        
+        json_str = self._extract_json_from_response(response)
+        
+        try:
+            data = json.loads(json_str)
+            questions = data.get("questions", data) if isinstance(data, dict) else data
+            
+            if questions:
+                validated = self._validate_questions(questions, difficulty, num_questions)
+                if validated:
+                    print(f"Simple prompt SUCCESS: {len(validated)} questions")
+                    return validated
+        except json.JSONDecodeError as e:
+            print(f"Simple prompt JSON error: {e}")
         
         return self._generate_fallback_quiz(title, difficulty, num_questions)
 
-    def _validate_question(self, question: dict) -> bool:
-        required_fields = ["question", "options", "answer", "difficulty", "explanation"]
+    def _validate_questions(self, questions: List, difficulty: str, num_questions: int) -> List[dict]:
+        """Validate and fix questions"""
+        validated = []
         
-        for field in required_fields:
-            if field not in question:
-                return False
+        for q in questions:
+            if not isinstance(q, dict):
+                continue
+                
+            # Check required fields
+            if "question" not in q or "options" not in q:
+                continue
+            
+            # Ensure options is a list of 4 items
+            if not isinstance(q["options"], list) or len(q["options"]) < 4:
+                continue
+            
+            # Trim to 4 options
+            q["options"] = q["options"][:4]
+            
+            # Fix answer field
+            if "answer" not in q or q["answer"] not in q["options"]:
+                # Try to find a matching option
+                found = False
+                if "answer" in q:
+                    for opt in q["options"]:
+                        if opt.lower().strip() == str(q["answer"]).lower().strip():
+                            q["answer"] = opt
+                            found = True
+                            break
+                if not found:
+                    q["answer"] = q["options"][0]
+            
+            # Set difficulty
+            if difficulty != "mixed":
+                q["difficulty"] = difficulty
+            elif "difficulty" not in q:
+                q["difficulty"] = "medium"
+            
+            # Ensure explanation exists
+            if "explanation" not in q or not q["explanation"]:
+                q["explanation"] = f"This is the correct answer based on the article content."
+            
+            validated.append(q)
+            
+            if len(validated) >= num_questions:
+                break
         
-        if not isinstance(question["options"], list) or len(question["options"]) != 4:
-            return False
-        
-        if question["answer"] not in question["options"]:
-            for opt in question["options"]:
-                if opt.lower().strip() == question["answer"].lower().strip():
-                    question["answer"] = opt
-                    return True
-            question["answer"] = question["options"][0]
-        
-        return True
+        return validated
 
     def _generate_fallback_quiz(self, title: str, difficulty: str, num_questions: int = 6) -> List[dict]:
-        diff = difficulty if difficulty != "mixed" else "easy"
-        fallback = [
+        """Generate fallback questions when LLM fails"""
+        print(f"WARNING: Using fallback quiz for {title}")
+        
+        diff = difficulty if difficulty != "mixed" else "medium"
+        
+        fallback_questions = [
             {
-                "question": f"What is the main subject of this article?",
-                "options": [title, "Unknown Topic", "Different Subject", "Not Mentioned"],
+                "question": f"What is the main topic of this Wikipedia article?",
+                "options": [title, "World History", "Science Fiction", "Ancient Civilizations"],
                 "answer": title,
                 "difficulty": diff,
-                "explanation": "This is the primary topic discussed in the article."
+                "explanation": f"The article is primarily about {title}."
             },
             {
-                "question": f"Which topic does this article primarily focus on?",
-                "options": ["Science", title, "History", "Geography"],
+                "question": f"Which subject does this article focus on?",
+                "options": ["Mathematics", title, "Geography", "Literature"],
                 "answer": title,
                 "difficulty": diff,
-                "explanation": "The article is centered around this main subject."
+                "explanation": f"This article provides information about {title}."
             },
             {
-                "question": f"What would be the best title for this article?",
-                "options": [f"Introduction to {title}", "Random Facts", "Unrelated Topic", "General Knowledge"],
+                "question": f"What would be an appropriate title for this article?",
+                "options": [f"Introduction to {title}", "Random Topics", "Unrelated Subject", "General Knowledge"],
                 "answer": f"Introduction to {title}",
                 "difficulty": diff,
-                "explanation": "The article provides information about this topic."
+                "explanation": f"The article covers various aspects of {title}."
             },
             {
-                "question": f"This article provides information about which subject?",
-                "options": ["Mathematics", "Literature", title, "Music"],
-                "answer": title,
+                "question": f"This article belongs to which category?",
+                "options": ["Entertainment", "Sports", f"Related to {title}", "Cooking"],
+                "answer": f"Related to {title}",
                 "difficulty": diff,
-                "explanation": "The content is focused on this particular subject."
+                "explanation": f"The content is centered around {title}."
+            },
+            {
+                "question": f"What type of information does this article provide?",
+                "options": [f"Facts about {title}", "Fiction stories", "Recipes", "Weather forecasts"],
+                "answer": f"Facts about {title}",
+                "difficulty": diff,
+                "explanation": f"The article presents factual information about {title}."
+            },
+            {
+                "question": f"Who would be most interested in reading this article?",
+                "options": [f"Someone researching {title}", "A chef", "A pilot", "A musician"],
+                "answer": f"Someone researching {title}",
+                "difficulty": diff,
+                "explanation": f"This article is useful for anyone wanting to learn about {title}."
             }
         ]
-        return fallback[:num_questions]
+        
+        return fallback_questions[:num_questions]
 
     def extract_entities(self, content: str) -> dict:
-        prompt = f"""Analyze this text and extract named entities into three categories.
+        """Extract named entities from content"""
+        
+        prompt = f"""Extract named entities from this text into three categories.
 
-Text to analyze:
-{content[:2500]}
+TEXT:
+{content[:3000]}
 
-Extract:
-1. People: Names of individuals mentioned (real people only)
-2. Organizations: Companies, institutions, universities, groups
-3. Locations: Countries, cities, places, geographical locations
+Return JSON format:
+{{"people": ["Name 1", "Name 2"], "organizations": ["Org 1", "Org 2"], "locations": ["Place 1", "Place 2"]}}
 
 Rules:
-- Maximum 5 items per category
-- Use empty arrays [] if no entities found in a category
-- Only extract entities that are actually mentioned in the text
-
-Return ONLY valid JSON in this exact format:
-{{"people":["Name 1","Name 2"],"organizations":["Org 1","Org 2"],"locations":["Place 1","Place 2"]}}
-
-JSON response:"""
+- Maximum 6 items per category
+- Only extract entities actually mentioned in text
+- Use empty array [] if none found
+- Return ONLY JSON"""
 
         response = self._call_llm(prompt, max_tokens=500)
+        
         if not response:
             return {"people": [], "organizations": [], "locations": []}
-            
-        cleaned = self._clean_json_response(response)
+        
+        json_str = self._extract_json_from_response(response)
         
         try:
-            data = json.loads(cleaned)
+            data = json.loads(json_str)
             return {
                 "people": data.get("people", [])[:8],
                 "organizations": data.get("organizations", [])[:8],
                 "locations": data.get("locations", [])[:8]
             }
-        except json.JSONDecodeError as e:
-            print(f"Entity extraction JSON error: {e}")
+        except json.JSONDecodeError:
             return {"people": [], "organizations": [], "locations": []}
 
     def get_related_topics(self, title: str, links: List[str]) -> List[str]:
+        """Get related Wikipedia topics"""
+        
         if not links:
             return []
-            
-        available_links = links[:25]
         
-        prompt = f"""From these Wikipedia topics related to "{title}", select the 8 most interesting and relevant topics for someone who wants to learn more.
+        available_links = links[:30]
+        
+        prompt = f"""From these Wikipedia topics related to "{title}", select the 8 most relevant and interesting.
 
-Available topics: {', '.join(available_links)}
+Topics: {', '.join(available_links)}
 
-Selection criteria:
-- Choose topics directly related to "{title}"
-- Prefer educational and substantive topics
-- Avoid very generic or unrelated topics
+Return JSON format:
+{{"topics": ["Topic 1", "Topic 2", "Topic 3", "Topic 4", "Topic 5", "Topic 6", "Topic 7", "Topic 8"]}}
 
-Return ONLY valid JSON in this exact format:
-{{"topics":["Topic 1","Topic 2","Topic 3","Topic 4","Topic 5","Topic 6","Topic 7","Topic 8"]}}
-
-JSON response:"""
+Return ONLY JSON."""
 
         response = self._call_llm(prompt, max_tokens=300)
+        
         if not response:
             return available_links[:8]
-            
-        cleaned = self._clean_json_response(response)
+        
+        json_str = self._extract_json_from_response(response)
         
         try:
-            data = json.loads(cleaned)
-            if isinstance(data, dict) and "topics" in data:
-                return data["topics"][:8]
-            elif isinstance(data, list):
-                return data[:8]
-        except json.JSONDecodeError as e:
-            print(f"Related topics JSON error: {e}")
-        
-        return available_links[:8]
+            data = json.loads(json_str)
+            topics = data.get("topics", []) if isinstance(data, dict) else data
+            return topics[:8] if isinstance(topics, list) else available_links[:8]
+        except json.JSONDecodeError:
+            return available_links[:8]
 
     async def generate_all_async(self, title: str, content: str, sections: List[str], links: List[str], difficulty: str = "mixed", num_questions: int = 6) -> dict:
+        """Generate all quiz data asynchronously"""
+        
         loop = asyncio.get_event_loop()
         
         quiz_task = loop.run_in_executor(
-            self.executor, 
-            self.generate_quiz, 
+            self.executor,
+            self.generate_quiz,
             title, content, sections, difficulty, num_questions
         )
         
